@@ -1,10 +1,21 @@
 from pathlib import Path
 
 import os
+import re
+import traceback
+import warnings
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import Protection
 from openpyxl.worksheet.protection import SheetProtection
+
+
+warnings.filterwarnings(
+	"ignore",
+	message="Workbook contains no default style, apply openpyxl's default",
+	category=UserWarning,
+	module="openpyxl.styles.stylesheet",
+)
 
 
 MAIN_FOLDER = Path("main")
@@ -56,6 +67,17 @@ def find_source_sheet(path):
 	raise KeyError(f"No source sheet found in {path.name}. Available sheets: {xl.sheet_names}")
 
 
+def find_template_details_sheet(path):
+	xl = pd.ExcelFile(path, engine=get_engine(path))
+	for sheet_name in xl.sheet_names:
+		if normalize_name(sheet_name) == normalize_name("Template Details"):
+			return sheet_name
+	for sheet_name in xl.sheet_names:
+		if "template" in sheet_name.lower() and "detail" in sheet_name.lower():
+			return sheet_name
+	raise KeyError(f"No Template Details sheet found in {path.name}. Available sheets: {xl.sheet_names}")
+
+
 def clean_text_value(value):
 	if pd.isna(value):
 		return ""
@@ -63,6 +85,41 @@ def clean_text_value(value):
 	if text.endswith(".0") and text[:-2].isdigit():
 		return text[:-2]
 	return text
+
+
+def safe_filename_stem(value):
+	text = re.sub(r"[\\/*?:\"<>|]", " ", str(value))
+	text = re.sub(r"\s+", " ", text).strip()
+	return text if text else "output"
+
+
+def parse_subject_for_filename(subject_text):
+	text = clean_text_value(subject_text)
+	if ":" in text:
+		left, right = text.split(":", 1)
+		combined = f"{left.strip()} {right.strip()}"
+		return safe_filename_stem(combined)
+	return safe_filename_stem(text)
+
+
+def extract_subject_metadata(input_path):
+	template_sheet = find_template_details_sheet(input_path)
+	template_df = pd.read_excel(input_path, sheet_name=template_sheet, dtype=str, engine=get_engine(input_path))
+	subject_col = find_column(template_df.columns, ["Subject"])
+	if subject_col is None:
+		raise KeyError("Missing required column(s) in Template Details: Subject")
+
+	non_empty_values = [
+		clean_text_value(value)
+		for value in template_df[subject_col]
+		if clean_text_value(value) != ""
+	]
+	if not non_empty_values:
+		raise ValueError("Template Details sheet has no non-empty Subject value")
+
+	subject_display_text = non_empty_values[0]
+	subject_filename_stem = parse_subject_for_filename(subject_display_text)
+	return subject_display_text, subject_filename_stem
 
 
 def build_question_paper_dataframe(source_df):
@@ -94,14 +151,13 @@ def build_question_paper_dataframe(source_df):
 	return output_df
 
 
-def build_basic_details_sheet(output_filename):
-	subject = Path(output_filename).stem
+def build_basic_details_sheet(subject_display_text):
 	return pd.DataFrame(
 		[
 			["Name", ""],
 			["DOB", ""],
 			["Roll No", ""],
-			["Subject", subject],
+			["Subject", subject_display_text],
 			["Exam Date", ""],
 			["Session", ""],
 		],
@@ -155,10 +211,12 @@ def write_workbook(output_path, question_df, basic_details_df):
 def process_workbook(input_path, output_path):
 	source_sheet_name = find_source_sheet(input_path)
 	source_df = pd.read_excel(input_path, sheet_name=source_sheet_name, dtype=str, engine=get_engine(input_path))
+	subject_display_text, subject_filename_stem = extract_subject_metadata(input_path)
+	resolved_output_path = output_path.with_name(f"{subject_filename_stem}.xlsx")
 	question_df = build_question_paper_dataframe(source_df)
-	basic_details_df = build_basic_details_sheet(output_path.name)
-	write_workbook(output_path, question_df, basic_details_df)
-	return len(question_df)
+	basic_details_df = build_basic_details_sheet(subject_display_text)
+	write_workbook(resolved_output_path, question_df, basic_details_df)
+	return len(question_df), resolved_output_path
 
 
 def main():
@@ -168,6 +226,8 @@ def main():
 	OUTPUT_FOLDER.mkdir(parents=True, exist_ok=True)
 	errors = []
 	success_count = 0
+
+	print("Process Started")
 
 	for root, _, files in os.walk(MAIN_FOLDER):
 		root_path = Path(root)
@@ -183,25 +243,35 @@ def main():
 			output_path = OUTPUT_FOLDER / relative_root / filename
 
 			try:
-				print(f"Processing: {input_path}")
-				row_count = process_workbook(input_path, output_path)
-				print(f"  Saved: {output_path} ({row_count} rows)")
+				_, _ = process_workbook(input_path, output_path)
 				success_count += 1
 			except Exception as exc:
-				message = f"{input_path} -> {exc}"
-				print(f"  Error: {message}")
-				errors.append(message)
+				errors.append({
+					"file": str(input_path),
+					"error": str(exc),
+					"traceback": traceback.format_exc(),
+				})
 
 	if errors:
 		with open(ERROR_LOG_FILE, "w", encoding="utf-8") as handle:
 			handle.write(f"Error Log - {len(errors)} failure(s)\n{'=' * 60}\n")
-			for error in errors:
-				handle.write(error + "\n")
+			for index, error in enumerate(errors, start=1):
+				handle.write(f"\nFailure #{index}\n")
+				handle.write(f"File: {error['file']}\n")
+				handle.write(f"Error: {error['error']}\n")
+				handle.write("Traceback:\n")
+				handle.write(error["traceback"] + "\n")
 
 	print("\nBatch complete")
 	print(f"Success: {success_count}")
 	print(f"Failed: {len(errors)}")
 	if errors:
+		for index, error in enumerate(errors, start=1):
+			print(f"\nFailure #{index}")
+			print(f"File: {error['file']}")
+			print(f"Error: {error['error']}")
+			print("Traceback:")
+			print(error["traceback"])
 		print(f"Error log: {ERROR_LOG_FILE}")
 
 
