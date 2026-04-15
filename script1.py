@@ -157,6 +157,7 @@ def build_basic_details_sheet(subject_display_text):
 			["Name", ""],
 			["DOB", ""],
 			["Roll No", ""],
+			["Email", ""],
 			["Subject", subject_display_text],
 			["Exam Date", ""],
 			["Session", ""],
