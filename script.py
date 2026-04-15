@@ -1,7 +1,7 @@
 import pandas as pd
 
 config_file = "noc26-cs79_S4.xlsx"
-output_file = "sample_question_answer_sheet.xlsx"
+output_file = "sam.xlsx"
 
 
 def normalize_name(value):
@@ -43,7 +43,7 @@ question_type_text = config_df[question_type_col].fillna("").astype(str)
 filtered_df = config_df[~question_type_text.str.contains("comprehension", case=False, regex=False)].copy()
 
 output_df = pd.DataFrame({
-	"Question id": filtered_df[question_id_col],
+	"Question id": filtered_df[question_id_col].apply(lambda value: "" if pd.isna(value) else str(value).strip()),
 	"S.No": range(1, len(filtered_df) + 1),
 	"Question Type": filtered_df[question_type_col],
 	"Marks": filtered_df[marks_col],
