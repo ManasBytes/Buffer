@@ -17,6 +17,37 @@ english_df = all_sheets["English"]
 # Filter for MCQ, MSQ, and SA question types
 filtered_df = config_df[config_df['Question Type'].isin(['MCQ', 'MSQ', 'SA'])]
 
+
+def find_column(columns, candidates):
+    def normalize_lookup(value):
+        return "".join(ch.lower() for ch in str(value).strip() if ch.isalnum())
+
+    normalized_map = {normalize_lookup(column): column for column in columns}
+    normalized_candidates = [normalize_lookup(candidate) for candidate in candidates]
+
+    for normalized_candidate in normalized_candidates:
+        if normalized_candidate in normalized_map:
+            return normalized_map[normalized_candidate]
+
+    for normalized_candidate in normalized_candidates:
+        for normalized_column, original_column in normalized_map.items():
+            if normalized_column.startswith(normalized_candidate) or normalized_candidate.startswith(normalized_column):
+                return original_column
+
+    return None
+
+
+config_question_id_col = find_column(config_df.columns, ["Question id", "Question ID", "QuestionId"])
+config_question_type_col = find_column(config_df.columns, ["Question Type", "QuestionType"])
+config_marks_col = find_column(config_df.columns, ["Marks", "Mark"])
+
+if config_question_id_col is None:
+    raise KeyError("Missing required column in Configuration Details: Question id")
+if config_question_type_col is None:
+    raise KeyError("Missing required column in Configuration Details: Question Type")
+if config_marks_col is None:
+    raise KeyError("Missing required column in Configuration Details: Marks")
+
 # Option id columns are right after 'No Of Options'
 all_columns = list(config_df.columns)
 no_of_options_index = all_columns.index('No Of Options')
@@ -417,23 +448,30 @@ concatenated_options = [
     for o1, o2, o3, o4 in zip(option_1, option_2, option_3, option_4)
 ]
 
-# Build a Question ID -> Correct Option map from English sheet
-english_question_ids = english_df['Question ID'].apply(normalize_question_id_for_match)
-english_correct_options = english_df['Correct Option'].apply(parse_correct_option)
-correct_option_map = dict(zip(english_question_ids, english_correct_options))
-
-english_answer_column = next(
-    (
-        column
-        for column in english_df.columns
-        if normalize_column_name(column).startswith("answerforsa")
-    ),
-    None,
+english_question_id_col = find_column(english_df.columns, ["Question ID", "Question id", "QuestionId"])
+english_correct_option_col = find_column(english_df.columns, ["Correct Option", "CorrectOption"])
+english_answer_col = find_column(
+    english_df.columns,
+    [
+        "Answer(For SA)/Skeletal Code(For Programming Test)/Static text (For Typing Test)",
+        "Answer(For SA)/\nSkeletal Code(For Programming Test)/\nStatic text (For Typing Test)",
+        "Answer(For SA)",
+    ],
 )
 
+if english_question_id_col is None:
+    raise KeyError("Missing required column in English sheet: Question ID")
+if english_correct_option_col is None:
+    raise KeyError("Missing required column in English sheet: Correct Option")
+
+# Build a Question ID -> Correct Option map from English sheet
+english_question_ids = english_df[english_question_id_col].apply(normalize_question_id_for_match)
+english_correct_options = english_df[english_correct_option_col].apply(parse_correct_option)
+correct_option_map = dict(zip(english_question_ids, english_correct_options))
+
 english_sa_answers = (
-    english_df[english_answer_column].apply(normalize_sa_answer)
-    if english_answer_column is not None
+    english_df[english_answer_col].apply(normalize_sa_answer)
+    if english_answer_col is not None
     else pd.Series([""] * len(english_df))
 )
 english_sa_answer_map = dict(zip(english_question_ids, english_sa_answers))
@@ -490,10 +528,10 @@ sa_case_sensitive_values = (
 )
 
 # Match using Question id and capture Correct Option (supports single and multi values)
-config_question_ids = filtered_df['Question id'].apply(normalize_question_id_for_match)
+config_question_ids = filtered_df[config_question_id_col].apply(normalize_question_id_for_match)
 correct_option_values = config_question_ids.map(correct_option_map).fillna("")
 
-sa_question_mask = filtered_df['Question Type'] == 'SA'
+sa_question_mask = filtered_df[config_question_type_col] == 'SA'
 sa_question_ids = config_question_ids
 sa_correct_answers = sa_question_ids.map(english_sa_answer_map).fillna("")
 
@@ -558,7 +596,7 @@ invalid_redirect_values = [
 ]
 
 # Marks from Configuration Details for the filtered question rows
-marks_values = filtered_df['Marks'].apply(normalize_marks).values
+marks_values = filtered_df[config_marks_col].apply(normalize_marks).values
 
 # Evaluate awarded mark and result for MCQ/MSQ/SA using selected answer vs configured correct answer.
 correct_mark_and_result = [
@@ -584,7 +622,7 @@ correct_mark_and_result = [
         sa_answer_type,
         sa_case_sensitive,
     ) in zip(
-        filtered_df['Question Type'].values,
+        filtered_df[config_question_type_col].values,
         selected_id_values,
         correct_option_id_values,
         marks_values,
@@ -602,7 +640,7 @@ result_values = [item[1] for item in correct_mark_and_result]
 output_df = pd.DataFrame({
     'S.No': range(1, len(filtered_df) + 1),
     'Question id': config_question_ids.values,
-    'Question Type': filtered_df['Question Type'].values,
+    'Question Type': filtered_df[config_question_type_col].values,
     'OPTION 1': option_1_values,
     'OPTION 2': option_2_values,
     'OPTION 3': option_3_values,
