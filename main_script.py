@@ -1,11 +1,14 @@
 import pandas as pd
 import os
 import math
+from openpyxl import load_workbook
+from openpyxl.styles import Border, Side
+from openpyxl.utils import get_column_letter
 
 
 
-answersheet_path = "sam.xlsx"
-config_file_path = "noc26-cs79_S4.xlsx"
+answersheet_path = "final_ans.xlsx"
+config_file_path = "required_sheets/noc26-cs79_S4.xlsx"
 all_sheets = pd.read_excel(config_file_path, sheet_name=None)
 
 
@@ -366,6 +369,26 @@ def normalize_column_name(column_name):
     return "".join(char for char in str(column_name).lower() if char.isalnum())
 
 
+def resolve_sheet_name(sheet_names, candidates):
+    normalized_sheet_map = {
+        normalize_column_name(sheet_name): sheet_name
+        for sheet_name in sheet_names
+    }
+
+    normalized_candidates = [normalize_column_name(candidate) for candidate in candidates]
+
+    for normalized_candidate in normalized_candidates:
+        if normalized_candidate in normalized_sheet_map:
+            return normalized_sheet_map[normalized_candidate]
+
+    for normalized_candidate in normalized_candidates:
+        for normalized_sheet_name, original_sheet_name in normalized_sheet_map.items():
+            if normalized_sheet_name.startswith(normalized_candidate) or normalized_candidate.startswith(normalized_sheet_name):
+                return original_sheet_name
+
+    return None
+
+
 def resolve_column_name(columns, candidates):
     normalized_column_map = {
         normalize_column_name(column): column
@@ -397,6 +420,19 @@ def build_candidate_entry_map(answer_sheet_file_path):
         return candidate_entry_map
 
     answer_sheets = pd.read_excel(answer_sheet_file_path, sheet_name=None)
+    question_paper_sheet_name = resolve_sheet_name(
+        answer_sheets.keys(),
+        [
+            "Question Paper Details",
+            "QuestionPaperDetails",
+        ],
+    )
+
+    if question_paper_sheet_name is None:
+        print("Warning: no 'Question Paper Details' sheet found in answer sheet")
+        return candidate_entry_map
+
+    answer_df = answer_sheets[question_paper_sheet_name]
     answer_column_candidates = [
         "enteryouranswer",
         "enteeryouranswer",
@@ -404,36 +440,149 @@ def build_candidate_entry_map(answer_sheet_file_path):
         "answer",
     ]
 
-    for sheet_name, answer_df in answer_sheets.items():
-        standardized_columns = {
-            normalize_column_name(column): column
-            for column in answer_df.columns
-        }
+    standardized_columns = {
+        normalize_column_name(column): column
+        for column in answer_df.columns
+    }
 
-        question_id_column = standardized_columns.get("questionid")
-        answer_column = None
-        for answer_column_key in answer_column_candidates:
-            if answer_column_key in standardized_columns:
-                answer_column = standardized_columns[answer_column_key]
-                break
+    question_id_column = standardized_columns.get("questionid")
+    answer_column = None
+    for answer_column_key in answer_column_candidates:
+        if answer_column_key in standardized_columns:
+            answer_column = standardized_columns[answer_column_key]
+            break
 
-        if question_id_column is None or answer_column is None:
-            continue
-
-        answer_question_ids = answer_df[question_id_column].apply(normalize_question_id_for_match)
-        answer_values = answer_df[answer_column].apply(
-            lambda value: "" if pd.isna(value) else str(value)
-        )
-
-        for question_id, answer_value in zip(answer_question_ids, answer_values):
-            if question_id != "":
-                candidate_entry_map[question_id] = answer_value
-
-        print(f"Using answer sheet tab: {sheet_name}")
+    if question_id_column is None or answer_column is None:
+        print("Warning: 'Question Paper Details' sheet does not have Question ID and Enter Your Answer columns")
         return candidate_entry_map
 
-    print("Warning: no valid answer sheet tab found with Question ID and Enter Your Answer columns")
+    answer_question_ids = answer_df[question_id_column].apply(normalize_question_id_for_match)
+    answer_values = answer_df[answer_column].apply(
+        lambda value: "" if pd.isna(value) else str(value)
+    )
+
+    for question_id, answer_value in zip(answer_question_ids, answer_values):
+        if question_id != "":
+            candidate_entry_map[question_id] = answer_value
+
+    print(f"Using answer sheet tab: {question_paper_sheet_name}")
     return candidate_entry_map
+
+
+def normalize_basic_details_value(value):
+    if pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+def extract_basic_detail_value(basic_df, label, all_labels):
+    target_key = normalize_column_name(label)
+    label_keys = {normalize_column_name(item) for item in all_labels}
+
+    row_count, col_count = basic_df.shape
+    for row_index in range(row_count):
+        for col_index in range(col_count):
+            cell_key = normalize_column_name(basic_df.iat[row_index, col_index])
+            if cell_key != target_key:
+                continue
+
+            # Prefer value on the same row to the right of the label.
+            for next_col_index in range(col_index + 1, col_count):
+                candidate = normalize_basic_details_value(basic_df.iat[row_index, next_col_index])
+                if candidate != "":
+                    return candidate
+
+            # If not found, support row-wise format where value is in next row.
+            next_row_index = row_index + 1
+            if next_row_index < row_count:
+                below_same_col = normalize_basic_details_value(basic_df.iat[next_row_index, col_index])
+                if below_same_col != "" and normalize_column_name(below_same_col) not in label_keys:
+                    return below_same_col
+
+                for any_col_index in range(col_count):
+                    candidate = normalize_basic_details_value(basic_df.iat[next_row_index, any_col_index])
+                    if candidate != "" and normalize_column_name(candidate) not in label_keys:
+                        return candidate
+
+            return ""
+
+    return ""
+
+
+def build_basic_details_rows(answer_sheet_file_path):
+    basic_details_rows = []
+
+    if str(answer_sheet_file_path).strip() == "":
+        return basic_details_rows
+
+    if not os.path.exists(answer_sheet_file_path):
+        return basic_details_rows
+
+    answer_sheets = pd.read_excel(answer_sheet_file_path, sheet_name=None, header=None)
+    basic_details_sheet_name = resolve_sheet_name(
+        answer_sheets.keys(),
+        [
+            "Basic Details",
+            "BasicDetails",
+        ],
+    )
+
+    if basic_details_sheet_name is None:
+        print("Warning: no 'Basic Details' sheet found in answer sheet")
+        return basic_details_rows
+
+    basic_df = answer_sheets[basic_details_sheet_name]
+    labels = ["Name", "DOB", "Roll No"]
+    for label in labels:
+        basic_details_rows.append((label, extract_basic_detail_value(basic_df, label, labels)))
+
+    return basic_details_rows
+
+
+def format_total_value(value):
+    numeric_value = float(value)
+    if numeric_value.is_integer():
+        return int(numeric_value)
+    return numeric_value
+
+
+def sum_numeric_values(values):
+    numeric_values = [parse_numeric_token(value) for value in values]
+    numeric_values = [value for value in numeric_values if value is not None]
+    return sum(numeric_values)
+
+
+def build_marks_rows(result_values, marks_values, correct_mark_values):
+    total_correct = sum(1 for value in result_values if str(value).strip() == "C")
+    total_partial_correct = sum(1 for value in result_values if str(value).strip() == "PC")
+    total_manual_corrections = sum(1 for value in result_values if str(value).strip() == "M")
+    total_wrong = sum(1 for value in result_values if str(value).strip() == "W")
+
+    total_marks = format_total_value(sum_numeric_values(marks_values))
+    total_correct_marks = format_total_value(sum_numeric_values(correct_mark_values))
+
+    return [
+        ("Marks", ""),
+        ("Total Correct", total_correct),
+        ("Total Partial Corrects", total_partial_correct),
+        ("Total Manual Corrections", total_manual_corrections),
+        ("Total Wrongly Answered", total_wrong),
+        ("Total Marks", total_marks),
+        ("Total Correct Marks", total_correct_marks),
+    ]
+
+
+def build_side_panel_columns(total_rows, side_panel_rows):
+    basic_detail_labels = [""] * total_rows
+    basic_detail_values = [""] * total_rows
+
+    for row_index, (label, value) in enumerate(side_panel_rows):
+        if row_index >= total_rows:
+            break
+        basic_detail_labels[row_index] = label
+        basic_detail_values[row_index] = value
+
+    return basic_detail_labels, basic_detail_values
 
 # Normalize option ids in the exact source order from Configuration Details
 option_1 = filtered_df[option_source_columns[0]].apply(normalize_id)
@@ -635,6 +784,13 @@ correct_mark_and_result = [
 ]
 correct_mark_values = [item[0] for item in correct_mark_and_result]
 result_values = [item[1] for item in correct_mark_and_result]
+basic_details_rows = build_basic_details_rows(answersheet_path)
+marks_rows = build_marks_rows(result_values, marks_values, correct_mark_values)
+if len(basic_details_rows) > 0:
+    side_panel_rows = basic_details_rows + [("", "")] + marks_rows
+else:
+    side_panel_rows = marks_rows
+basic_details_label_values, basic_details_value_values = build_side_panel_columns(len(filtered_df), side_panel_rows)
 
 # Create a new dataframe with S.No, Question id, Question Type, OPTION 1-4, separator, and concatenated options
 output_df = pd.DataFrame({
@@ -655,11 +811,50 @@ output_df = pd.DataFrame({
     'Marks': marks_values,
     'Correct Mark': correct_mark_values,
     'Result': result_values,
+    '__gap1': "",
+    '__gap2': "",
+    '__gap3': "",
+    'Basic Details': basic_details_label_values,
+    'Basic Details Value': basic_details_value_values,
 })
 
 # Create a new Excel file with the filtered data
 output_file = "filtered_questions.xlsx"
-output_df.to_excel(output_file, index=False, sheet_name='Questions')
+
+display_df = output_df.rename(columns={
+    '__gap1': "",
+    '__gap2': " ",
+    '__gap3': "  ",
+    'Basic Details Value': "",
+})
+
+display_df.to_excel(output_file, index=False, sheet_name='Questions')
+
+if len(side_panel_rows) > 0:
+    workbook = load_workbook(output_file)
+    worksheet = workbook['Questions']
+
+    basic_details_col_idx = display_df.columns.get_loc('Basic Details') + 1
+    basic_details_value_col_idx = basic_details_col_idx + 1
+
+    worksheet.column_dimensions[get_column_letter(basic_details_col_idx)].width = 28
+    worksheet.column_dimensions[get_column_letter(basic_details_value_col_idx)].width = 32
+
+    thin_border = Border(
+        left=Side(style='thin'),
+        right=Side(style='thin'),
+        top=Side(style='thin'),
+        bottom=Side(style='thin'),
+    )
+
+    border_start_row = 1
+    border_end_row = 1 + len(side_panel_rows)
+
+    for row_idx in range(border_start_row, border_end_row + 1):
+        for col_idx in (basic_details_col_idx, basic_details_value_col_idx):
+            worksheet.cell(row=row_idx, column=col_idx).border = thin_border
+
+    workbook.save(output_file)
 
 print(f"File created: {output_file}")
 print(f"Total questions filtered: {len(output_df)}")
